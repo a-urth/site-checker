@@ -1,0 +1,5 @@
+{
+    "dbType": "postgres",
+    "dbConnection": "",
+    "goRoutinesMaxNumber": 50
+}
