@@ -1,5 +1,5 @@
 {
     "dbType": "postgres",
     "dbConnection": "",
-    "goRoutinesMaxNumber": 50
+    "goRoutinesMaxNumber": 70
 }

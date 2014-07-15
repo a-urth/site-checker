@@ -6,11 +6,10 @@ import (
 	"encoding/json"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/parnurzeal/gorequest"
 	"log"
 	"math/rand"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -74,7 +73,7 @@ func getConf(confFile string) (*Configuration, error) {
 }
 
 type Proxy struct {
-	proxies [](*url.URL)
+	proxies []string
 }
 
 func (proxy *Proxy) loadProxies(fileName string) error {
@@ -86,74 +85,33 @@ func (proxy *Proxy) loadProxies(fileName string) error {
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		proxy_url, _ := url.Parse("http://" + scanner.Text())
-		proxy.proxies = append(proxy.proxies, proxy_url)
+		proxy.proxies = append(proxy.proxies, "http://"+scanner.Text())
 	}
 	return nil
 }
 
-func (proxy Proxy) getProxy(request *http.Request) (*url.URL, error) {
-	return proxy.proxies[rand.Intn(len(proxy.proxies))], nil
-}
-
-func TimeoutDialer(cTimeout time.Duration) func(net, addr string) (c net.Conn, err error) {
-	return func(netw, addr string) (net.Conn, error) {
-		conn, err := net.DialTimeout(netw, addr, cTimeout)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
-}
-
-func doRequest(
-	req *http.Request,
-	connTimeout time.Duration,
-	rwTimeount time.Duration,
-	proxyFunc func(*http.Request) (*url.URL, error),
-) (*http.Response, error, bool) {
-	transport := &http.Transport{
-		Dial:  TimeoutDialer(connTimeout),
-		Proxy: proxyFunc,
-	}
-	client := &http.Client{Transport: transport}
-
-	timeout := false
-	timer := time.AfterFunc(rwTimeount, func() {
-		transport.CancelRequest(req)
-		timeout = true
-	})
-	resp, err := client.Do(req)
-	if timer != nil {
-		timer.Stop()
-	}
-
-	return resp, err, timeout
+func (proxy *Proxy) getProxy() string {
+	return proxy.proxies[rand.Intn(len(proxy.proxies))]
 }
 
 func checkSite(exc Exchange) {
 	defer wg.Done()
 
-	req, _ := http.NewRequest("HEAD", exc.Comp.Url, nil)
-	resp, err, timeout := doRequest(req, 5*time.Second, 10*time.Second, proxy.getProxy)
+	req := gorequest.New().Proxy(proxy.getProxy()).Timeout(10 * time.Second)
+	resp, _, errs := req.Get(exc.Comp.Url).End()
 
-	if timeout {
-		log.Printf("%#v - TIMEOUT\n", exc.Comp.Url)
-		exc.Comp.updateCompanyStatus("not_active")
-		return
-	}
-
-	if err != nil {
+	if len(errs) != 0 {
 		if exc.Retries < 3 {
 			exc.Retries += 1
 			exc.addToChannel()
 		}
-		err := err.(*url.Error)
-		log.Printf("<<< REQUEST ERROR: URL - %#v, ERR - %#v\n", err.URL, err.Err)
+		log.Printf("<<< REQUEST ERROR <<< | URL %#v", exc.Comp.Url)
+		for _, err := range errs {
+			log.Printf("Error - %#v", err)
+		}
 		return
 	}
 
-	defer resp.Body.Close()
 	log.Printf("%#v - %#v\n", exc.Comp.Url, resp.StatusCode)
 
 	var status string
@@ -162,13 +120,13 @@ func checkSite(exc Exchange) {
 	} else {
 		status = "not_active"
 	}
-	err = exc.Comp.updateCompanyStatus(status)
+	err := exc.Comp.updateCompanyStatus(status)
 	if err != nil {
 		if exc.Retries < 3 {
 			exc.Retries += 1
 			exc.addToChannel()
 		}
-		log.Printf("<<< DATABASE ERROR - %#v", err)
+		log.Printf("<<< DATABASE ERROR <<< | ERR %#v | URL - %#v", err, exc.Comp.Url)
 	}
 }
 
@@ -190,7 +148,7 @@ func main() {
 
 	db = sqlx.MustConnect(conf.DbType, conf.DbConnection)
 	comps := []Company{}
-	err = db.Select(&comps, "SELECT id, company_site FROM company ORDER BY ID LIMIT 300")
+	err = db.Select(&comps, "SELECT id, company_site FROM company ORDER BY last_site_refresh LIMIT 10000")
 	if err != nil {
 		log.Fatalln(err)
 	}
